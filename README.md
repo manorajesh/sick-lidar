@@ -1,5 +1,17 @@
 # SICK LMS200 driver for Python
 
+[![tests](https://github.com/manorajesh/sick-lidar/actions/workflows/tests.yml/badge.svg)](https://github.com/manorajesh/sick-lidar/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Hardware: SICK LMS200](https://img.shields.io/badge/hardware-SICK%20LMS200-0a7ea4)](#scanner-settings-to-know-about)
+[![Interface: RS-232](https://img.shields.io/badge/interface-RS--232-555555)](#wiring)
+
+<p align="center">
+  <img src="docs/example-scan.png" alt="Live top-down view of a room's walls from lidar.py view, with the scanner at the red triangle" width="720">
+  <br>
+  <sub>Live view (<code>lidar.py --fov 100 --resolution 0.25 view</code>): room walls as seen from the scanner (red triangle).</sub>
+</p>
+
 A small Python driver and command-line tool for the **SICK LMS200** 2D laser
 scanner (and likely other LMS2xx models) over RS-232. It needs no SICK
 software; it was written from SICK's published protocol manuals.
@@ -76,7 +88,8 @@ corrupted frames).
 |---|---|
 | `lms200.py` | Driver: framing, checksum, commands, scan decoding |
 | `lidar.py` | Command-line tool (`info`, `scan`, `units`, `record`, `view`) |
-| `tests/` | Offline protocol tests |
+| `tests/` | Offline protocol tests (run in CI by `.github/workflows/tests.yml`) |
+| `docs/` | Images for this README |
 | `local/` | Git-ignored. For your copies of the manuals and notes about your own scanner |
 
 ### Reference manuals (not included)
