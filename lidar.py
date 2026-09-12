@@ -6,6 +6,7 @@
     python lidar.py record out.csv -n 50 # stream N scans to CSV (0 = until Ctrl-C)
     python lidar.py view                 # live top-down map (metres)
     python lidar.py --fov 100 --resolution 0.25 view   # finer angle, narrower field
+    python lidar.py osc --osc-port 9000  # stream scans as OSC over UDP
 """
 
 from __future__ import annotations
@@ -23,9 +24,13 @@ from lms200 import LMS200, LMSError
 
 def open_scanner(args) -> LMS200:
     lms = LMS200(args.port, verbose=args.verbose)
-    lms.connect(baud=args.baud)
-    lms.get_config()
-    lms.set_variant(args.fov, args.resolution)
+    try:
+        lms.connect(baud=args.baud)
+        lms.get_config()
+        lms.set_variant(args.fov, args.resolution)
+    except BaseException:
+        lms.close()
+        raise
     return lms
 
 
@@ -161,13 +166,113 @@ def cmd_view(args):
         lms.close()
 
 
+def osc_messages(scan, prefix: str = "/lms200", hz: float = 0.0) -> list[tuple[str, list]]:
+    """OSC (address, arguments) pairs for one scan.
+
+    Arrays have a fixed length, so index i is always the same angle. Readings with
+    no valid return are sent as range 0 with x = y = 0.
+    """
+    ranges, xs, ys = [], [], []
+    nearest = None
+    for a, r in zip(scan.angles_deg, scan.ranges_m):
+        if math.isnan(r):
+            ranges.append(0.0)
+            xs.append(0.0)
+            ys.append(0.0)
+            continue
+        x, y = r * math.cos(math.radians(a)), r * math.sin(math.radians(a))
+        ranges.append(r)
+        xs.append(x)
+        ys.append(y)
+        if nearest is None or r < nearest[1]:
+            nearest = [a, r, x, y]
+    angles = scan.angles_deg
+    step = angles[1] - angles[0] if len(angles) > 1 else 0.0
+    return [
+        (f"{prefix}/info", [len(ranges), float(angles[0]), float(step), float(hz)]),
+        (f"{prefix}/ranges", ranges),
+        (f"{prefix}/x", xs),
+        (f"{prefix}/y", ys),
+        (f"{prefix}/nearest", nearest or [0.0, 0.0, 0.0, 0.0]),
+    ]
+
+
+def run_osc(args, send, open_fn=open_scanner, sleep=time.sleep, retry_s: float = 2.0):
+    """Stream scans as OSC via send(address, args), reconnecting whenever the scanner
+    or USB adapter drops out. Runs until Ctrl-C."""
+    prefix = "/" + args.prefix.strip("/")
+    send_failing = False
+
+    def emit(address, values):
+        # UDP is fire-and-forget: a network hiccup must not look like a scanner failure.
+        nonlocal send_failing
+        try:
+            send(address, values)
+            send_failing = False
+        except OSError as e:
+            if not send_failing:
+                print(f"\nOSC send failed ({e}); continuing", flush=True)
+            send_failing = True
+
+    lms = None
+    try:
+        while True:
+            try:
+                lms = open_fn(args)
+                lms.start_stream()
+                emit(f"{prefix}/connected", 1)
+                print(f"scanner connected: {lms.angular_range}° @ {lms.resolution}°", flush=True)
+                t_prev, hz = None, 0.0
+                for s in lms.stream():
+                    now = time.time()
+                    if t_prev is not None:
+                        rate = 1.0 / max(now - t_prev, 1e-3)
+                        hz = rate if hz == 0.0 else 0.8 * hz + 0.2 * rate
+                    t_prev = now
+                    msgs = osc_messages(s, prefix, hz)
+                    for address, values in msgs:
+                        emit(address, values)
+                    a, r = msgs[-1][1][:2]
+                    print(f"\r{hz:5.1f} Hz   nearest {r:6.3f} m at {a:6.2f}°", end="", flush=True)
+            except (LMSError, serial.SerialException, OSError) as e:
+                if lms is not None:
+                    try:
+                        lms.close()
+                    except Exception:
+                        pass
+                    lms = None
+                emit(f"{prefix}/connected", 0)
+                print(f"\nscanner unavailable ({e}); retrying in {retry_s:g} s", flush=True)
+                sleep(retry_s)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if lms is not None:
+            try:
+                lms.stop_stream()
+            except Exception:
+                pass
+            lms.close()
+        emit(f"{prefix}/connected", 0)
+
+
+def cmd_osc(args):
+    try:
+        from pythonosc.udp_client import SimpleUDPClient
+    except ImportError:
+        sys.exit("error: OSC output needs python-osc:  pip install -e '.[osc]'")
+    client = SimpleUDPClient(args.host, args.osc_port)
+    print(f"sending OSC to {args.host}:{args.osc_port} (Ctrl-C to stop)")
+    run_osc(args, client.send_message)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", default=None, help="serial device (default: auto-detect the Keyspan)")
     p.add_argument("--baud", type=int, default=38400, choices=[9600, 19200, 38400])
     p.add_argument("--fov", type=int, default=180, choices=[180, 100], help="scan angle in degrees")
-    p.add_argument("--resolution", type=float, default=0.5, choices=[1.0, 0.5, 0.25],
-                   help="angular step in degrees (0.25 needs --fov 100)")
+    p.add_argument("--resolution", type=float, default=None, choices=[1.0, 0.5, 0.25],
+                   help="angular step in degrees (default 0.5; 1.0 for osc; 0.25 needs --fov 100)")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("info")
@@ -179,12 +284,19 @@ def main():
     r.add_argument("-n", type=int, default=0, help="number of scans (0 = until Ctrl-C)")
     v = sub.add_parser("view")
     v.add_argument("--rmax", type=float, default=None, help="fixed view radius in metres (default: fit to scene)")
+    o = sub.add_parser("osc", help="stream scans as OSC over UDP, reconnecting automatically")
+    o.add_argument("--host", default="127.0.0.1", help="destination IP (default: this machine)")
+    o.add_argument("--osc-port", type=int, default=9000, help="destination UDP port (default 9000)")
+    o.add_argument("--prefix", default="/lms200", help="OSC address prefix (default /lms200)")
     args = p.parse_args()
+    if args.resolution is None:
+        # 1° doubles the scan rate at 38400 baud and keeps each OSC message in one UDP packet.
+        args.resolution = 1.0 if args.cmd == "osc" else 0.5
     if args.resolution == 0.25 and args.fov != 100:
         p.error("0.25° resolution is only available with --fov 100")
     try:
         {"info": cmd_info, "scan": cmd_scan, "units": cmd_units, "record": cmd_record,
-         "view": cmd_view}[args.cmd](args)
+         "view": cmd_view, "osc": cmd_osc}[args.cmd](args)
     except (LMSError, serial.SerialException) as e:
         sys.exit(f"error: {e}")
 

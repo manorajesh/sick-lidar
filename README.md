@@ -18,6 +18,7 @@ software; it was written from SICK's published protocol manuals.
 
 - Connects at whatever baud rate the scanner is using (9600, 19200 or 38400)
 - Single scans, continuous streaming, CSV recording, and a live top-down map
+- OSC output over UDP, with automatic reconnection
 - Reads the scanner's configuration and can switch between mm and cm units
 - Offline tests built from the manual's example packets
 
@@ -30,7 +31,7 @@ Keyspan USA-19HS USB-serial adapter. Any USB-to-RS-232 adapter should work
 ```sh
 git clone <this repo> && cd sick-lidar
 python3 -m venv .venv
-.venv/bin/pip install -e ".[view]"     # drop [view] if you don't need the live plot
+.venv/bin/pip install -e ".[view,osc]"   # extras: view = live plot, osc = OSC output
 ```
 
 ## Usage
@@ -41,6 +42,7 @@ python3 -m venv .venv
 .venv/bin/python lidar.py record out.csv -n 100 # stream scans to CSV (-n 0 = until Ctrl-C)
 .venv/bin/python lidar.py view                  # live top-down map, auto-fits the room (--rmax to fix)
 .venv/bin/python lidar.py --fov 100 --resolution 0.25 view   # 0.25° steps over the middle 100°
+.venv/bin/python lidar.py osc                   # stream OSC to 127.0.0.1:9000 (see below)
 .venv/bin/python lidar.py units mm|cm           # permanently set distance units (writes EEPROM)
 ```
 
@@ -72,6 +74,46 @@ with LMS200() as lms:          # or LMS200("/dev/ttyUSB0")
     lms.stop_stream()
 ```
 
+## OSC output
+
+```sh
+.venv/bin/python lidar.py osc                          # to this machine, UDP port 9000
+.venv/bin/python lidar.py osc --host 192.168.1.20 --osc-port 7000 --prefix /lidar
+```
+
+Each scan is sent as these messages (default prefix `/lms200`):
+
+| Address | Arguments |
+|---|---|
+| `/lms200/ranges` | One float per angle: distance in metres, **0 = no return** |
+| `/lms200/x`, `/lms200/y` | One float per angle: position in metres (x right, y straight ahead; 0, 0 for no return) |
+| `/lms200/nearest` | `angle_deg range_m x y` of the closest reading |
+| `/lms200/info` | `count start_deg step_deg scans_per_s` |
+| `/lms200/connected` | `1` while streaming, `0` when the scanner is lost or `osc` stops |
+
+The arrays always have the same length, so value *i* is always angle
+`start_deg + i × step_deg`. If the scanner or USB adapter drops out, `osc`
+sends `connected 0`, keeps retrying every 2 s, and resumes on its own.
+
+`osc` defaults to 1° steps, a trade-off between detail and speed:
+
+| Mode | Values per array | Scans/s | Message size |
+|---|---|---|---|
+| `osc` (180° @ 1°) | 181 | 9.4 | ~0.9 KB |
+| `osc --fov 100` (100° @ 1°) | 101 | 15 | ~0.5 KB |
+| `osc --resolution 0.5` | 361 | 4.7 | ~1.8 KB |
+
+Messages larger than ~1.4 KB are split into several network packets when sent
+to another machine, and losing any one piece drops that whole scan. This
+doesn't apply when sending to the same machine.
+
+**Receiving.** Any OSC receiver listening on the chosen UDP port works. All
+values are 32-bit floats except `count` and `connected`, which are integers.
+
+- `x` and `y` together make a point cloud of the scan. Skip points where the range is 0.
+- `nearest` and `connected` are the easiest to use for simple triggers or presence detection.
+- To inspect the stream, point any OSC monitor tool (or a `python-osc` server) at the port.
+
 ## Tests
 
 ```sh
@@ -80,15 +122,16 @@ with LMS200() as lms:          # or LMS200("/dev/ttyUSB0")
 
 They run without a scanner. They check the checksum against the example packets
 printed in SICK's manuals and decode synthetic scans (mm/cm, error codes, 100° field,
-corrupted frames).
+corrupted frames). They also check the OSC message layout and the reconnect logic
+against a simulated scanner that drops out.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `lms200.py` | Driver: framing, checksum, commands, scan decoding |
-| `lidar.py` | Command-line tool (`info`, `scan`, `units`, `record`, `view`) |
-| `tests/` | Offline protocol tests (run in CI by `.github/workflows/tests.yml`) |
+| `lidar.py` | Command-line tool (`info`, `scan`, `units`, `record`, `view`, `osc`) |
+| `tests/` | Offline tests: protocol and OSC (run in CI by `.github/workflows/tests.yml`) |
 | `docs/` | Images for this README |
 | `local/` | Git-ignored. For your copies of the manuals and notes about your own scanner |
 
@@ -198,8 +241,9 @@ connector: a bridge switches the port to RS-422, which the Keyspan cannot talk t
 
 - The model, firmware version and serial number reported by the scanner (`3A`
   type and `31` status replies) matched the labels on its housing. The last
-  digit of the type reply (`LMS200;30106x;V02.10`) read `3` in cm mode and `1`
-  after switching to mm; the manual (§7.15.2, p.65) doesn't say what it encodes.
+  digit of the type reply (`LMS200;30106x;V02.10`) read `3` or `1` in different
+  sessions, with no link to the unit setting; the manual (§7.15.2, p.65)
+  doesn't say what it encodes.
 - In a recording of 30 streamed scans, all 30 were complete, with all 361
   readings valid in each. The reading straight ahead was 2.004 m ± 0.5 cm across scans.
 
