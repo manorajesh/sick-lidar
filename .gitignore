@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Never published: SICK manuals (© SICK AG, all rights reserved) and notes
+# specific to one scanner (labels, serial number, stored configuration)
+local/
+
+# Scan recordings
+*.csv
+
+# macOS
+.DS_Store

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sick-lms200"
+version = "0.1.0"
+description = "Python driver and CLI for the SICK LMS200 laser scanner over RS-232"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+view = ["matplotlib>=3.5"]
+
+[project.scripts]
+lms200 = "lidar:main"
+
+[tool.setuptools]
+py-modules = ["lms200", "lidar"]
