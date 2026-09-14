@@ -1,0 +1,4 @@
+# Consistent LF line endings in the repo, whatever the contributor's OS
+* text=auto eol=lf
+*.png binary
+*.pdf binary

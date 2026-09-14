@@ -9,10 +9,14 @@ Telegram frame (little-endian):
 LEN counts CMD + DATA. Replies from the LMS carry ADDR | 0x80, CMD | 0x80,
 and a status byte just before the CRC. Each accepted request is preceded by
 an ACK (0x06); a bad checksum gets a NAK (0x15).
+
+Logs to the "lms200" logger: packet traffic and retries at DEBUG, connection
+events at INFO. Nothing is printed unless the application configures logging.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import struct
 import time
@@ -21,24 +25,28 @@ from dataclasses import dataclass, field
 import serial
 from serial.tools import list_ports
 
+log = logging.getLogger(__name__)
+
 STX, ACK, NAK = 0x02, 0x06, 0x15
 KEYSPAN_VID = 0x06CD  # Keyspan / InnoSys (USA-19HS reports PID 0x0121)
 
 
 def find_port() -> str:
-    """Locate the Keyspan adapter. Its /dev name embeds an IORegistry ID that
-    changes on every re-plug or sleep/wake, so it can't be hardcoded."""
+    """Pick the serial port for the scanner: a Keyspan adapter if present, otherwise
+    the only USB serial port. Port names aren't stable (macOS embeds an ID that
+    changes on re-plug or sleep; Windows may assign a new COM number per USB socket),
+    so they are looked up by USB vendor ID instead of hardcoded."""
     ports = list_ports.comports()
     for p in ports:
         if p.vid == KEYSPAN_VID:
             return p.device
-    usb = [p.device for p in ports if p.vid is not None]
+    usb = [p for p in ports if p.vid is not None]
     if len(usb) == 1:
-        return usb[0]
-    raise serial.SerialException(
-        "Keyspan adapter not found. Is it plugged in? "
-        f"Serial ports seen: {', '.join(p.device for p in ports) or 'none'}"
-    )
+        return usb[0].device
+    seen = ", ".join(p.device if p.description in ("", "n/a") else f"{p.device} ({p.description})"
+                     for p in ports) or "none"
+    reason = "several USB serial ports found" if usb else "no USB serial adapter found"
+    raise serial.SerialException(f"{reason}; choose one with --port. Serial ports seen: {seen}")
 
 
 # Command 20h sub-commands (section 7.4.1)
@@ -104,14 +112,17 @@ class Scan:
 
 
 class LMS200:
-    def __init__(self, port: str | None = None, verbose: bool = False):
-        self.verbose = verbose
+    def __init__(self, port: str | None = None):
         port = port or find_port()
-        self.log("using port", port)
-        self.ser = serial.Serial(
-            port, 9600, bytesize=8, parity="N", stopbits=1, timeout=0.05,
-            xonxoff=False, rtscts=False, dsrdtr=False,
-        )
+        log.info("opening %s", port)
+        try:
+            self.ser = serial.Serial(
+                port, 9600, bytesize=8, parity="N", stopbits=1, timeout=0.05,
+                xonxoff=False, rtscts=False, dsrdtr=False,
+            )
+        except serial.SerialException as e:
+            # Windows reports a port held by another program as "Access is denied".
+            raise serial.SerialException(f"could not open {port} (is another program using it?): {e}") from e
         self._buf = bytearray()
         self.distance_bits = 13
         self.unit_mm = True
@@ -120,10 +131,6 @@ class LMS200:
         self.config: bytes | None = None
 
     # ---------- low-level I/O ----------
-
-    def log(self, *args):
-        if self.verbose:
-            print("[lms]", *args, flush=True)
 
     def close(self):
         self.ser.close()
@@ -147,7 +154,7 @@ class LMS200:
 
     def send(self, payload: bytes):
         tel = build_telegram(payload)
-        self.log("TX", tel.hex(" "))
+        log.debug("TX %s", tel.hex(" "))
         self.ser.write(tel)
         self.ser.flush()
 
@@ -159,7 +166,7 @@ class LMS200:
             if tel is not None:
                 if expect_cmd is None or tel.cmd == expect_cmd:
                     return tel
-                self.log(f"skipping reply 0x{tel.cmd:02X} while waiting for 0x{expect_cmd:02X}")
+                log.debug("skipping reply 0x%02X while waiting for 0x%02X", tel.cmd, expect_cmd)
                 continue
             if time.monotonic() > deadline:
                 return None
@@ -202,16 +209,17 @@ class LMS200:
             ack = self._wait_ack(0.3)
             if ack is None:
                 last = "no ACK/NAK"
-                self.log(f"attempt {attempt + 1}: {last}")
+                log.debug("attempt %d: %s", attempt + 1, last)
                 continue
             if ack == NAK:
                 last = "NAK (checksum rejected)"
-                self.log(f"attempt {attempt + 1}: {last}")
+                log.debug("attempt %d: %s", attempt + 1, last)
                 time.sleep(0.05)
                 continue
             tel = self.read_telegram(timeout, expect_cmd=reply_cmd)
             if tel is not None:
-                self.log(f"RX 0x{tel.cmd:02X} data={tel.data.hex(' ')} status=0x{tel.status:02X}")
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("RX 0x%02X data=%s status=0x%02X", tel.cmd, tel.data.hex(" "), tel.status)
                 return tel
             last = f"ACK but no 0x{reply_cmd:02X} reply"
         raise LMSError(f"command 0x{payload[0]:02X} failed: {last}")
@@ -244,14 +252,14 @@ class LMS200:
                 found = b
                 break
             except LMSError as e:
-                self.log(f"no answer at {b} baud: {e}")
+                log.debug("no answer at %d baud: %s", b, e)
         if found is None:
             raise LMSError(
                 "LMS did not respond at 9600/19200/38400 baud. Check power (green LED), "
                 "the null-modem wiring (LMS pin 2<->PC pin 3, 3<->2, 5<->5) and that pins 7/8 "
                 "are NOT bridged in the LMS connector (that selects RS-422)."
             )
-        self.log(f"LMS answered at {found} baud")
+        log.info("scanner answered at %d baud", found)
         if baud != found:
             self.set_baud(baud)
 
@@ -262,7 +270,7 @@ class LMS200:
         self.ser.baudrate = baud
         time.sleep(0.1)
         self.flush_input()
-        self.log(f"now at {baud} baud")
+        log.info("switched to %d baud", baud)
 
     # ---------- queries ----------
 
@@ -313,6 +321,8 @@ class LMS200:
         if current[6] == want:
             return False
         new = bytes(current[:6]) + bytes([want]) + bytes(current[7:])
+        log.info("writing configuration to EEPROM: unit %s -> %s", "mm" if current[6] else "cm", "mm" if mm else "cm")
+        log.info("previous configuration: %s", bytes(current).hex(" "))
 
         self.enter_setup()
         try:
@@ -328,6 +338,7 @@ class LMS200:
         self.get_config()
         if self.config[6] != want:
             raise LMSError("unit change did not persist")
+        log.info("configuration written and verified")
         return True
 
     def set_variant(self, angular_range: int = 180, resolution: float = 0.5) -> None:

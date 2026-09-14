@@ -1,8 +1,6 @@
 """OSC output tests (no scanner or python-osc needed): python -m unittest discover tests"""
 
 import argparse
-import contextlib
-import io
 import math
 import sys
 import unittest
@@ -78,13 +76,33 @@ class TestReconnect(unittest.TestCase):
 
         sent = []
         args = argparse.Namespace(prefix="lms200/")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with self.assertLogs("lidar", level="INFO") as logs:
             run_osc(args, lambda a, v: sent.append((a, v)), open_fn=open_fn, sleep=lambda s: None)
 
         connected = [v for a, v in sent if a == "/lms200/connected"]
         self.assertEqual(connected, [0, 1, 0, 1, 0])  # fail, up, drop, up, Ctrl-C
         self.assertEqual(sum(a == "/lms200/ranges" for a, _ in sent), 3)
         self.assertTrue(dropped.closed and final.closed)
+        warnings = [m for m in logs.output if m.startswith("WARNING")]
+        self.assertEqual(len(warnings), 2)  # one per outage
+        self.assertIn("no answer", warnings[0])
+        self.assertIn("stream stalled", warnings[1])
+
+    def test_long_outage_does_not_warn_on_every_retry(self):
+        errors = [LMSError("no answer")] * 100
+        attempts = iter(errors + [FakeLMS([], KeyboardInterrupt())])
+
+        def open_fn(_args):
+            item = next(attempts)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with self.assertLogs("lidar", level="INFO") as logs:
+            run_osc(argparse.Namespace(prefix="/lms200"), lambda a, v: None,
+                    open_fn=open_fn, sleep=lambda s: None, retry_s=2.0)
+        warnings = [m for m in logs.output if m.startswith("WARNING")]
+        self.assertEqual(len(warnings), 4)  # first failure, then about once a minute (every 30th)
 
     def test_send_errors_do_not_trigger_reconnect(self):
         scan = make_scan([1.0] * 181)
@@ -98,9 +116,10 @@ class TestReconnect(unittest.TestCase):
         def send(address, values):
             raise OSError("network is unreachable")
 
-        with contextlib.redirect_stdout(io.StringIO()):
+        with self.assertLogs("lidar", level="WARNING") as logs:
             run_osc(argparse.Namespace(prefix="/lms200"), send, open_fn=open_fn, sleep=lambda s: None)
         self.assertEqual(len(opens), 1)
+        self.assertEqual(len(logs.output), 1)  # reported once, not per message
 
 
 if __name__ == "__main__":

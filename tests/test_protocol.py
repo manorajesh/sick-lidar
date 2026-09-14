@@ -5,10 +5,14 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import serial
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lms200 import LMS200, build_telegram, crc16  # noqa: E402
+from lms200 import KEYSPAN_VID, LMS200, build_telegram, crc16, find_port  # noqa: E402
 
 # Example telegrams printed in the SICK manuals (quick manual C.2–C.9, telegram listing §7).
 MANUAL_EXAMPLES = {
@@ -26,7 +30,6 @@ MANUAL_EXAMPLES = {
 def offline_lms(buf: bytes = b"", fov: int = 180) -> LMS200:
     """An LMS200 with no serial port, for exercising the parser."""
     lms = LMS200.__new__(LMS200)
-    lms.verbose = False
     lms._buf = bytearray(buf)
     lms.distance_bits = 13
     lms.angular_range = fov
@@ -86,6 +89,31 @@ class TestScanDecoding(unittest.TestCase):
         frame = bytearray(scan_reply([500] * 181))
         frame[100] ^= 0xFF
         self.assertIsNone(offline_lms(bytes(frame))._parse_one())
+
+
+def fake_port(device, vid=None, description="n/a"):
+    return SimpleNamespace(device=device, vid=vid, description=description)
+
+
+class TestFindPort(unittest.TestCase):
+    def find(self, ports):
+        with mock.patch("lms200.list_ports.comports", return_value=ports):
+            return find_port()
+
+    def test_prefers_keyspan(self):
+        ports = [fake_port("COM1"), fake_port("COM4", vid=0x0403), fake_port("COM7", vid=KEYSPAN_VID)]
+        self.assertEqual(self.find(ports), "COM7")
+
+    def test_single_usb_adapter(self):
+        ports = [fake_port("COM1"), fake_port("/dev/ttyUSB0", vid=0x0403)]
+        self.assertEqual(self.find(ports), "/dev/ttyUSB0")
+
+    def test_ambiguous_or_missing(self):
+        for ports in ([fake_port("COM1")], [fake_port("COM3", vid=0x0403), fake_port("COM4", vid=0x067B)]):
+            with self.subTest(ports=[p.device for p in ports]):
+                with self.assertRaises(serial.SerialException) as cm:
+                    self.find(ports)
+                self.assertIn("--port", str(cm.exception))
 
 
 if __name__ == "__main__":

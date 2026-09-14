@@ -10,6 +10,14 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = ["pyserial>=3.5"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
 
 [project.optional-dependencies]
 view = ["matplotlib>=3.5"]

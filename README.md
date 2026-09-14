@@ -22,34 +22,50 @@ software; it was written from SICK's published protocol manuals.
 - Reads the scanner's configuration and can switch between mm and cm units
 - Offline tests built from the manual's example packets
 
-Tested on macOS (Apple Silicon) with an LMS200-30106 (firmware V02.10) and a
-Keyspan USA-19HS USB-serial adapter. Any USB-to-RS-232 adapter should work
-(pass `--port`), but only the Keyspan has been tested.
+Tested with hardware on macOS (Apple Silicon) using an LMS200-30106 (firmware
+V02.10) and a Keyspan USA-19HS USB-serial adapter. It's written to run on
+Windows and Linux too. CI runs the offline tests on all three, but those
+platforms haven't been tried with a scanner yet. Any USB-to-RS-232 adapter
+should work (pass `--port`), but only the Keyspan has been tested.
 
 ## Install
 
+macOS / Linux:
+
 ```sh
-git clone <this repo> && cd sick-lidar
+git clone https://github.com/manorajesh/sick-lidar.git && cd sick-lidar
 python3 -m venv .venv
-.venv/bin/pip install -e ".[view,osc]"   # extras: view = live plot, osc = OSC output
+source .venv/bin/activate
+pip install -e ".[view,osc]"     # extras: view = live plot, osc = OSC output
+```
+
+Windows (PowerShell or cmd):
+
+```bat
+git clone https://github.com/manorajesh/sick-lidar.git && cd sick-lidar
+py -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[view,osc]"
 ```
 
 ## Usage
 
+With the virtual environment activated:
+
 ```sh
-.venv/bin/python lidar.py info                  # identify scanner, read stored config
-.venv/bin/python lidar.py scan                  # one scan as an angle/range table
-.venv/bin/python lidar.py record out.csv -n 100 # stream scans to CSV (-n 0 = until Ctrl-C)
-.venv/bin/python lidar.py view                  # live top-down map, auto-fits the room (--rmax to fix)
-.venv/bin/python lidar.py --fov 100 --resolution 0.25 view   # 0.25° steps over the middle 100°
-.venv/bin/python lidar.py osc                   # stream OSC to 127.0.0.1:9000 (see below)
-.venv/bin/python lidar.py units mm|cm           # permanently set distance units (writes EEPROM)
+python lidar.py info                  # identify scanner, read stored config
+python lidar.py scan                  # one scan as an angle/range table
+python lidar.py record out.csv -n 100 # stream scans to CSV (-n 0 = until Ctrl-C)
+python lidar.py view                  # live top-down map, auto-fits the room (--rmax to fix)
+python lidar.py --fov 100 --resolution 0.25 view   # 0.25° steps over the middle 100°
+python lidar.py osc                   # stream OSC to 127.0.0.1:9000 (see below)
+python lidar.py units mm|cm           # permanently set distance units (writes EEPROM)
 ```
 
 After `pip install`, the same commands are also available as `lms200 <command>`.
 
-- The port is auto-detected (Keyspan by USB vendor ID, or the only USB serial
-  port present). Use `--port /dev/…` to choose one.
+- The port is auto-detected (a Keyspan adapter by USB vendor ID, or else the only
+  USB serial port present). Use `--port COM3` or `--port /dev/ttyUSB0` to choose one.
 - `--fov`/`--resolution` are not saved on the scanner; it returns to 180°/0.5° at power-up.
 - `units` is the only command that writes the scanner's EEPROM, which has limited
   write cycles, so don't call it in a loop. Everything else is read-only or resets at power-up.
@@ -61,9 +77,12 @@ no valid return (out of range, dazzle, or another error code).
 From your own code:
 
 ```python
+import logging
 from lms200 import LMS200
 
-with LMS200() as lms:          # or LMS200("/dev/ttyUSB0")
+logging.basicConfig(level=logging.INFO)  # optional: show the driver's connection log
+
+with LMS200() as lms:          # or LMS200("COM3") / LMS200("/dev/ttyUSB0")
     lms.connect()              # finds the scanner at 9600/19200/38400, switches to 38400
     lms.get_config()           # reads distance units and bit layout
     lms.set_variant(180, 0.5)
@@ -74,11 +93,38 @@ with LMS200() as lms:          # or LMS200("/dev/ttyUSB0")
     lms.stop_stream()
 ```
 
+## Logging
+
+Diagnostics go to stderr, and results (tables, CSV summaries) go to stdout, so
+you can redirect data without log noise.
+
+```sh
+python lidar.py -v scan                       # debug: every packet sent and received
+python lidar.py -q record out.csv             # warnings and errors only
+python lidar.py --log-file lidar.log osc      # also append timestamped logs to a file
+```
+
+The driver logs to the `lms200` logger, and the CLI to `lidar`. In your own
+code, the driver prints nothing unless you configure `logging`. During long
+`osc` runs, the log shows a status line every 10 s, one warning when the
+scanner drops out, and a reminder about once a minute while it stays unavailable.
+
+## Windows notes
+
+- **Driver:** install the Keyspan USA-19HS driver for Windows (Keyspan is now
+  part of Tripp Lite / Eaton), or use any USB-to-RS-232 adapter with a Windows driver.
+- **Port:** the adapter shows up as `COMn` in Device Manager under *Ports (COM & LPT)*.
+  Auto-detection normally finds it; otherwise pass `--port COM3`.
+- **"Access is denied"** when opening the port means another program has it open.
+  Windows allows only one program per COM port.
+- The COM number can change if the adapter is plugged into a different USB socket.
+  Auto-detection handles that.
+
 ## OSC output
 
 ```sh
-.venv/bin/python lidar.py osc                          # to this machine, UDP port 9000
-.venv/bin/python lidar.py osc --host 192.168.1.20 --osc-port 7000 --prefix /lidar
+python lidar.py osc                          # to this machine, UDP port 9000
+python lidar.py osc --host 192.168.1.20 --osc-port 7000 --prefix /lidar
 ```
 
 Each scan is sent as these messages (default prefix `/lms200`):
@@ -113,17 +159,19 @@ values are 32-bit floats except `count` and `connected`, which are integers.
 - `x` and `y` together make a point cloud of the scan. Skip points where the range is 0.
 - `nearest` and `connected` are the easiest to use for simple triggers or presence detection.
 - To inspect the stream, point any OSC monitor tool (or a `python-osc` server) at the port.
+- When sending to another machine, its firewall must allow incoming UDP on that port.
 
 ## Tests
 
 ```sh
-.venv/bin/python -m unittest discover tests
+python -m unittest discover tests
 ```
 
 They run without a scanner. They check the checksum against the example packets
 printed in SICK's manuals and decode synthetic scans (mm/cm, error codes, 100° field,
-corrupted frames). They also check the OSC message layout and the reconnect logic
-against a simulated scanner that drops out.
+corrupted frames). They also cover port auto-detection (including Windows COM
+names), the OSC message layout, and the reconnect and logging behaviour against a
+simulated scanner that drops out. CI runs them on Linux, Windows and macOS.
 
 ## Repository layout
 
