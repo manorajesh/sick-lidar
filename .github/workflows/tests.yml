@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install ".[osc]"
+      - run: pip install ".[osc,pointcloud]"
       - run: python -m unittest discover tests -v
+      - run: python -m unittest discover apps/pointcloud/tests -v
       - run: lms200 --help
+      - run: python apps/pointcloud/pointcloud.py --help

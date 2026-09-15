@@ -10,8 +10,11 @@ dist/
 # specific to one scanner (labels, serial number, stored configuration)
 local/
 
-# Scan recordings
+# Scan recordings, point clouds and capture sessions
 *.csv
+*.ply
+*.jsonl
+*.log
 
 # macOS
 .DS_Store

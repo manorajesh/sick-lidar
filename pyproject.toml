@@ -22,6 +22,7 @@ classifiers = [
 [project.optional-dependencies]
 view = ["matplotlib>=3.5"]
 osc = ["python-osc>=1.8"]
+pointcloud = ["python-osc>=1.8", "numpy>=1.23"]  # apps/pointcloud (add [view] for --preview)
 
 [project.scripts]
 lms200 = "lidar:main"

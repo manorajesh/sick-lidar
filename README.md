@@ -19,6 +19,8 @@ software; it was written from SICK's published protocol manuals.
 - Connects at whatever baud rate the scanner is using (9600, 19200 or 38400)
 - Single scans, continuous streaming, CSV recording, and a live top-down map
 - OSC output over UDP, with automatic reconnection
+- A separate app, [`apps/pointcloud`](apps/pointcloud), that builds 3D point
+  clouds by combining scans with a phone's orientation (e.g. GyrOSC)
 - Reads the scanner's configuration and can switch between mm and cm units
 - Offline tests built from the manual's example packets
 
@@ -180,6 +182,7 @@ simulated scanner that drops out. CI runs them on Linux, Windows and macOS.
 | `lms200.py` | Driver: framing, checksum, commands, scan decoding |
 | `lidar.py` | Command-line tool (`info`, `scan`, `units`, `record`, `view`, `osc`) |
 | `tests/` | Offline tests: protocol and OSC (run in CI by `.github/workflows/tests.yml`) |
+| `apps/pointcloud/` | 3D point clouds from scans plus a phone's orientation; see its README |
 | `docs/` | Images for this README |
 | `local/` | Git-ignored. For your copies of the manuals and notes about your own scanner |
 
